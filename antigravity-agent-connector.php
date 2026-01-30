@@ -55,6 +55,26 @@ class Antigravity_Agent_Connector {
                         'type'     => 'string',
                         'required' => true,
                     ),
+                    'previous_hash' => array(
+                        'type'     => 'string',
+                        'required' => true,
+                    ),
+                ),
+            )
+        );
+
+        register_rest_route(
+            self::REST_NAMESPACE,
+            '/read-theme-file',
+            array(
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => array(__CLASS__, 'read_theme_file'),
+                'permission_callback' => array(__CLASS__, 'can_edit_theme_files'),
+                'args'                => array(
+                    'file' => array(
+                        'type'     => 'string',
+                        'required' => true,
+                    ),
                 ),
             )
         );
@@ -185,9 +205,18 @@ class Antigravity_Agent_Connector {
     public static function edit_theme_file(WP_REST_Request $request) {
         $relative_path = (string) $request->get_param('file');
         $code          = (string) $request->get_param('code');
+        $previous_hash = (string) $request->get_param('previous_hash');
 
         if ($relative_path === '') {
             return new WP_Error('missing_file', 'File parameter is required.', array('status' => 400));
+        }
+
+        if ($previous_hash === '') {
+            return new WP_Error(
+                'missing_previous_hash',
+                'previous_hash is required. Read the file before writing.',
+                array('status' => 400)
+            );
         }
 
         $relative_path = ltrim($relative_path, '/');
@@ -216,6 +245,20 @@ class Antigravity_Agent_Connector {
             return new WP_Error('file_not_writable', 'File is not writable.', array('status' => 500));
         }
 
+        $current_contents = file_get_contents($real_target);
+        if ($current_contents === false) {
+            return new WP_Error('read_failed', 'Unable to read file before writing.', array('status' => 500));
+        }
+
+        $current_hash = hash('sha256', $current_contents);
+        if (!hash_equals($current_hash, $previous_hash)) {
+            return new WP_Error(
+                'hash_mismatch',
+                'File contents changed since last read. Please read the file again before writing.',
+                array('status' => 409)
+            );
+        }
+
         $bytes = file_put_contents($real_target, $code, LOCK_EX);
         if ($bytes === false) {
             return new WP_Error('write_failed', 'Unable to write file.', array('status' => 500));
@@ -225,6 +268,55 @@ class Antigravity_Agent_Connector {
             array(
                 'success' => true,
                 'file'    => $relative_path,
+                'hash'    => hash('sha256', $code),
+            )
+        );
+    }
+
+    public static function read_theme_file(WP_REST_Request $request) {
+        $relative_path = (string) $request->get_param('file');
+
+        if ($relative_path === '') {
+            return new WP_Error('missing_file', 'File parameter is required.', array('status' => 400));
+        }
+
+        $relative_path = ltrim($relative_path, '/');
+        $theme_dir     = wp_normalize_path(get_stylesheet_directory());
+        $target_path   = wp_normalize_path($theme_dir . '/' . $relative_path);
+
+        $real_theme_dir = realpath($theme_dir);
+        $real_target    = realpath($target_path);
+
+        if ($real_theme_dir === false || $real_target === false) {
+            return new WP_Error('invalid_path', 'File path is invalid.', array('status' => 400));
+        }
+
+        $real_theme_dir = wp_normalize_path($real_theme_dir);
+        $real_target    = wp_normalize_path($real_target);
+
+        if (strpos($real_target, $real_theme_dir . '/') !== 0) {
+            return new WP_Error('path_outside_theme', 'File must be within the active theme directory.', array('status' => 403));
+        }
+
+        if (!file_exists($real_target) || !is_file($real_target)) {
+            return new WP_Error('file_not_found', 'File does not exist.', array('status' => 404));
+        }
+
+        if (!is_readable($real_target)) {
+            return new WP_Error('file_not_readable', 'File is not readable.', array('status' => 500));
+        }
+
+        $contents = file_get_contents($real_target);
+        if ($contents === false) {
+            return new WP_Error('read_failed', 'Unable to read file.', array('status' => 500));
+        }
+
+        return rest_ensure_response(
+            array(
+                'file'    => $relative_path,
+                'code'    => $contents,
+                'hash'    => hash('sha256', $contents),
+                'success' => true,
             )
         );
     }
